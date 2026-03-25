@@ -1,0 +1,23 @@
+# Core dependencies
+streamlit>=1.28.0,<2.0.0
+selenium>=4.35.0,<5.0.0
+requests>=2.32.5,<3.0.0
+python-telegram-bot>=20.7,<21.0.0
+python-dotenv>=1.1.1,<2.0.0
+
+# Security & Encryption
+cryptography>=41.0.0,<42.0.0
+cffi>=1.15.0,<2.0.0
+
+# Database & Utils
+psutil>=6.1.1,<7.0.0
+pytz>=2024.1,<2025.0
+pillow>=10.0.0,<11.0.0
+
+# WebDriver management
+webdriver-manager>=4.0.0,<5.0.0
+
+# Web server (optional)
+flask>=3.1.2,<4.0.0
+flask-cors>=6.0.1,<7.0.0
+gunicorn>=21.0.0,<22.0.0
