@@ -2,10 +2,11 @@ services:
   - type: web
     name: facebook-telegram-bot
     runtime: python
-    plan: free
+    plan: starter
     buildCommand: |
       apt-get update
       apt-get install -y chromium chromium-driver
+      pip install --upgrade pip
       pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
