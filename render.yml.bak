@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  syapa-bot:
+    build: .
+    container_name: syapa_bot
+    restart: always
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - WHATSAPP_NUMBER=${WHATSAPP_NUMBER}
+      - FACEBOOK_CONTACT=${FACEBOOK_CONTACT}
+      - PORT=4000
+      - TZ=Asia/Karachi
+    volumes:
+      - ./data:/app/data
+      - ./users.db:/app/users.db
+    ports:
+      - "4000:4000"
+    networks:
+      - syapa_network
+
+networks:
+  syapa_network:
+    driver: bridge
