@@ -36,9 +36,14 @@ ADMIN_USER_IDS = [int(x) for x in os.environ.get('ADMIN_USER_IDS', '7791213862')
 OWNER_NAME = os.environ.get('OWNER_NAME', 'SYAPA KING')
 OWNER_FACEBOOK = os.environ.get('OWNER_FACEBOOK', 'https://www.facebook.com/share/168AJz6Ehm/')
 
-# Data directory for Render persistence
-DATA_DIR = Path(os.environ.get('DATA_DIR', '/outputs'))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+# Data directory for Render persistence - FIXED PATH
+DATA_DIR = Path(os.environ.get('DATA_DIR', '/tmp/data'))
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except PermissionError:
+    # Fallback to /app/data if /tmp/data fails
+    DATA_DIR = Path('/app/data')
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = DATA_DIR / 'facebook_bot.db'
 ENCRYPTION_KEY_FILE = DATA_DIR / '.encryption_key'
@@ -140,7 +145,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    logger.info("Database initialized")
+    logger.info(f"Database initialized at {DB_PATH}")
 
 def get_or_create_user(telegram_id: int, username: str = None) -> tuple:
     """Get existing user or create new one"""
@@ -580,9 +585,9 @@ def start_inbox_automation(user_id: int, config: Dict, log_callback=None):
     thread.daemon = True
     thread.start()
 
-# ==================== GROUP AUTOMATION (Same as inbox but for groups) ====================
+# ==================== GROUP AUTOMATION ====================
 def send_group_messages(config: Dict, user_id: int, log_callback=None):
-    """Send messages to group - similar to inbox but for groups"""
+    """Send messages to group"""
     driver = None
     messages_sent = 0
     
@@ -629,7 +634,7 @@ def send_group_messages(config: Dict, user_id: int, log_callback=None):
         driver.get(f'https://www.facebook.com/groups/{group_id}')
         time.sleep(8)
         
-        # Find comment box (groups have different structure)
+        # Find comment box
         comment_input = None
         selectors = [
             'div[contenteditable="true"][aria-label*="Write a comment" i]',
@@ -748,7 +753,7 @@ class AutomationBot:
     def __init__(self):
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         self.setup_handlers()
-        self.user_log_callbacks = {}  # Store log callbacks per user
+        self.user_log_callbacks = {}
     
     def setup_handlers(self):
         """Setup all handlers"""
