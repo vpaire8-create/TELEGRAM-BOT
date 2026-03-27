@@ -1142,5 +1142,26 @@ For support: """ + OWNER_FACEBOOK
         self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
+    # For Render - keep alive
+    import threading
+    import socket
+    
+    def keep_alive():
+        try:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.bind(("0.0.0.0", int(os.environ.get("PORT", 8080))))
+            server.listen(1)
+            print(f"Keep-alive server running on port {os.environ.get('PORT', 8080)}")
+            while True:
+                conn, addr = server.accept()
+                conn.sendall(b"Bot is running!")
+                conn.close()
+        except Exception as e:
+            print(f"Keep-alive server error: {e}")
+    
+    # Start keep-alive in background
+    threading.Thread(target=keep_alive, daemon=True).start()
+    
+    # Start bot
     bot = AutomationBot()
     bot.run()
