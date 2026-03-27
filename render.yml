@@ -2,6 +2,7 @@ services:
   - type: web
     name: facebook-telegram-bot
     runtime: python
+    plan: free
     buildCommand: |
       apt-get update
       apt-get install -y chromium chromium-driver
@@ -16,3 +17,7 @@ services:
         sync: false
       - key: DATA_DIR
         value: /opt/render/project/outputs
+    disk:
+      name: data
+      mountPath: /opt/render/project/outputs
+      sizeGB: 1
