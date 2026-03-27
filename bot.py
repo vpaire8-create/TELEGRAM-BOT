@@ -1142,26 +1142,32 @@ For support: """ + OWNER_FACEBOOK
         self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    # For Render - keep alive
-    import threading
-    import socket
+    # Add these imports at the top
+from flask import Flask
+import threading
+
+# Create a simple Flask app for health check
+health_app = Flask(__name__)
+
+@health_app.route('/')
+@health_app.route('/health')
+def health_check():
+    return "Bot is running!", 200
+
+def run_health_server():
+    """Run Flask server for Render health checks"""
+    port = int(os.environ.get('PORT', 8080))
+    health_app.run(host='0.0.0.0', port=port)
+
+if __name__ == "__main__":
+    # Initialize database
+    init_db()
     
-    def keep_alive():
-        try:
-            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server.bind(("0.0.0.0", int(os.environ.get("PORT", 8080))))
-            server.listen(1)
-            print(f"Keep-alive server running on port {os.environ.get('PORT', 8080)}")
-            while True:
-                conn, addr = server.accept()
-                conn.sendall(b"Bot is running!")
-                conn.close()
-        except Exception as e:
-            print(f"Keep-alive server error: {e}")
+    # Start health check server in background
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
     
-    # Start keep-alive in background
-    threading.Thread(target=keep_alive, daemon=True).start()
-    
-    # Start bot
+    # Start Telegram bot
+    logger.info("Starting Facebook Automation Bot...")
     bot = AutomationBot()
     bot.run()
