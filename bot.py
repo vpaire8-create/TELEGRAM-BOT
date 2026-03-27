@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-SYAPA KING - FACEBOOK AUTOMATION BOT (TELEGRAM VERSION)
-Based on working Streamlit app code
-Supports: Inbox Automation & Group Messaging Automation
+SYAPA KING - COMPLETE FACEBOOK AUTOMATION BOT
+Features:
+1. Inbox Automation (Cookie-based, Selenium)
+2. Group Automation (Cookie-based, Selenium)
+Telegram Bot Control
 """
 
 import sqlite3
@@ -13,11 +15,10 @@ import time
 import threading
 import asyncio
 import logging
+import urllib.parse
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, List
-from dataclasses import dataclass
-
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -30,18 +31,16 @@ from telegram.ext import (
 )
 
 # ==================== CONFIGURATION ====================
-# Render environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7791213862:AAFvGyuCCVZqpnQQwjZBbu89drzuiJPAcJM')
 ADMIN_USER_IDS = [int(x) for x in os.environ.get('ADMIN_USER_IDS', '7791213862').split(',')]
 OWNER_NAME = os.environ.get('OWNER_NAME', 'SYAPA KING')
 OWNER_FACEBOOK = os.environ.get('OWNER_FACEBOOK', 'https://www.facebook.com/share/168AJz6Ehm/')
 
-# Data directory for Render persistence - FIXED PATH
+# Data directory
 DATA_DIR = Path(os.environ.get('DATA_DIR', '/tmp/data'))
 try:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 except PermissionError:
-    # Fallback to /app/data if /tmp/data fails
     DATA_DIR = Path('/app/data')
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -51,11 +50,7 @@ ENCRYPTION_KEY_FILE = DATA_DIR / '.encryption_key'
 # Conversation states
 (CHOOSING_AUTOMATION, WAITING_COOKIES, WAITING_INBOX_CHAT_ID, WAITING_NAME_PREFIX,
  WAITING_DELAY, WAITING_MESSAGES, WAITING_GROUP_ID, WAITING_GROUP_MESSAGES,
- WAITING_GROUP_DELAY) = range(9)
-
-# Automation types
-AUTO_INBOX = "inbox"
-AUTO_GROUP = "group"
+ WAITING_GROUP_DELAY, WAITING_GROUP_NAME) = range(10)
 
 # Logging
 logging.basicConfig(
@@ -64,9 +59,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Active automation threads
+active_inbox_threads = {}
+active_group_threads = {}
+
 # ==================== ENCRYPTION ====================
 def get_encryption_key():
-    """Get or create encryption key"""
     if ENCRYPTION_KEY_FILE.exists():
         with open(ENCRYPTION_KEY_FILE, 'rb') as f:
             return f.read()
@@ -94,7 +92,6 @@ def decrypt_data(encrypted_data: str) -> str:
 
 # ==================== DATABASE ====================
 def init_db():
-    """Initialize database"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -110,7 +107,7 @@ def init_db():
         )
     ''')
     
-    # Inbox config table (same as streamlit app)
+    # Inbox configs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inbox_configs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,12 +124,13 @@ def init_db():
         )
     ''')
     
-    # Group config table
+    # Group configs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS group_configs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             group_id TEXT,
+            group_name TEXT,
             delay INTEGER DEFAULT 30,
             cookies_encrypted TEXT,
             messages TEXT,
@@ -148,7 +146,6 @@ def init_db():
     logger.info(f"Database initialized at {DB_PATH}")
 
 def get_or_create_user(telegram_id: int, username: str = None) -> tuple:
-    """Get existing user or create new one"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -168,7 +165,6 @@ def get_or_create_user(telegram_id: int, username: str = None) -> tuple:
         return user_id, approval_key, 0
 
 def approve_user(telegram_id: int) -> bool:
-    """Approve a user"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('UPDATE users SET approved = 1 WHERE telegram_id = ?', (telegram_id,))
@@ -177,8 +173,8 @@ def approve_user(telegram_id: int) -> bool:
     conn.close()
     return affected > 0
 
+# Inbox functions
 def save_inbox_config(user_id: int, chat_id: str, name_prefix: str, delay: int, messages: str, cookies: str):
-    """Save inbox config"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     encrypted_cookies = encrypt_data(cookies)
@@ -193,7 +189,6 @@ def save_inbox_config(user_id: int, chat_id: str, name_prefix: str, delay: int, 
     conn.close()
 
 def get_inbox_config(user_id: int) -> Optional[Dict]:
-    """Get inbox config"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -216,7 +211,6 @@ def get_inbox_config(user_id: int) -> Optional[Dict]:
     return None
 
 def update_inbox_running(user_id: int, running: int, message_count: int = None):
-    """Update inbox running status"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     if message_count is not None:
@@ -227,27 +221,26 @@ def update_inbox_running(user_id: int, running: int, message_count: int = None):
     conn.commit()
     conn.close()
 
-def save_group_config(user_id: int, group_id: str, delay: int, messages: str, cookies: str):
-    """Save group config"""
+# Group functions
+def save_group_config(user_id: int, group_id: str, group_name: str, delay: int, messages: str, cookies: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     encrypted_cookies = encrypt_data(cookies)
     
     cursor.execute('''
         INSERT OR REPLACE INTO group_configs 
-        (user_id, group_id, delay, messages, cookies_encrypted)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, group_id, delay, messages, encrypted_cookies))
+        (user_id, group_id, group_name, delay, messages, cookies_encrypted)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (user_id, group_id, group_name, delay, messages, encrypted_cookies))
     
     conn.commit()
     conn.close()
 
 def get_group_config(user_id: int) -> Optional[Dict]:
-    """Get group config"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT group_id, delay, messages, cookies_encrypted, running, message_count
+        SELECT group_id, group_name, delay, messages, cookies_encrypted, running, message_count
         FROM group_configs WHERE user_id = ?
     ''', (user_id,))
     row = cursor.fetchone()
@@ -256,16 +249,16 @@ def get_group_config(user_id: int) -> Optional[Dict]:
     if row:
         return {
             'group_id': row[0],
-            'delay': row[1] or 30,
-            'messages': row[2] or '',
-            'cookies': decrypt_data(row[3]) if row[3] else '',
-            'running': row[4] or 0,
-            'message_count': row[5] or 0
+            'group_name': row[1] or '',
+            'delay': row[2] or 30,
+            'messages': row[3] or '',
+            'cookies': decrypt_data(row[4]) if row[4] else '',
+            'running': row[5] or 0,
+            'message_count': row[6] or 0
         }
     return None
 
 def update_group_running(user_id: int, running: int, message_count: int = None):
-    """Update group running status"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     if message_count is not None:
@@ -276,49 +269,34 @@ def update_group_running(user_id: int, running: int, message_count: int = None):
     conn.commit()
     conn.close()
 
-# ==================== SELENIUM HELPERS (Same as working Streamlit app) ====================
+# ==================== SELENIUM HELPERS ====================
 def setup_browser(log_callback=None):
-    """Setup Chrome browser - exact same as working streamlit app"""
-    if log_callback:
-        log_callback("🌐 Setting up Chrome browser...")
-    
     chrome_options = Options()
     chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-setuid-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--disable-extensions')
     chrome_options.add_argument('--window-size=1920,1080')
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36')
     
-    # Find Chromium/Chrome
-    chromium_paths = [
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/google-chrome',
-        '/usr/bin/chrome'
-    ]
-    
+    # Find Chromium
+    chromium_paths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/usr/bin/chrome']
     for path in chromium_paths:
         if Path(path).exists():
             chrome_options.binary_location = path
             if log_callback:
-                log_callback(f"✅ Found browser at: {path}")
+                log_callback(f"✅ Browser found: {path}")
             break
     
     # Find ChromeDriver
-    chromedriver_paths = [
-        '/usr/bin/chromedriver',
-        '/usr/local/bin/chromedriver'
-    ]
-    
+    driver_paths = ['/usr/bin/chromedriver', '/usr/local/bin/chromedriver']
     driver_path = None
-    for path in chromedriver_paths:
+    for path in driver_paths:
         if Path(path).exists():
             driver_path = path
             if log_callback:
-                log_callback(f"✅ Found chromedriver at: {path}")
+                log_callback(f"✅ Driver found: {path}")
             break
     
     try:
@@ -329,146 +307,165 @@ def setup_browser(log_callback=None):
             driver = webdriver.Chrome(options=chrome_options)
         
         driver.set_window_size(1920, 1080)
-        if log_callback:
-            log_callback("✅ Browser setup complete!")
         return driver
     except Exception as e:
         if log_callback:
-            log_callback(f"❌ Browser setup failed: {e}")
+            log_callback(f"❌ Browser error: {e}")
         raise
 
-def find_message_input(driver, log_callback=None):
-    """Find message input - exact same as working streamlit app"""
-    if log_callback:
-        log_callback("🔍 Finding message input...")
+def add_facebook_cookies(driver, cookies_str, log_callback=None):
+    if not cookies_str:
+        return False
+    
+    driver.get('https://www.facebook.com/')
     time.sleep(5)
     
-    # Scroll to bottom and top
-    try:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(2)
-    except:
-        pass
+    cookie_pairs = cookies_str.split(';')
+    for pair in cookie_pairs:
+        pair = pair.strip()
+        if '=' in pair:
+            name, value = pair.split('=', 1)
+            try:
+                driver.add_cookie({'name': name.strip(), 'value': value.strip(), 'domain': '.facebook.com', 'path': '/'})
+            except:
+                pass
     
-    message_input_selectors = [
+    driver.refresh()
+    time.sleep(5)
+    
+    if 'login' in driver.current_url.lower():
+        if log_callback:
+            log_callback("❌ Login failed! Cookies may be expired.")
+        return False
+    
+    if log_callback:
+        log_callback("✅ Login successful!")
+    return True
+
+def find_message_input(driver, log_callback=None):
+    time.sleep(5)
+    
+    selectors = [
         'div[contenteditable="true"][role="textbox"]',
-        'div[contenteditable="true"][data-lexical-editor="true"]',
-        'div[aria-label*="message" i][contenteditable="true"]',
-        'div[aria-label*="Message" i][contenteditable="true"]',
-        'div[contenteditable="true"][spellcheck="true"]',
+        'div[contenteditable="true"]',
         '[role="textbox"][contenteditable="true"]',
-        'textarea[placeholder*="message" i]',
-        'div[aria-placeholder*="message" i]',
-        'div[data-placeholder*="message" i]',
-        '[contenteditable="true"]',
-        'textarea',
-        'input[type="text"]'
+        'textarea'
     ]
     
-    for idx, selector in enumerate(message_input_selectors):
+    for selector in selectors:
         try:
             elements = driver.find_elements(By.CSS_SELECTOR, selector)
             for element in elements:
-                try:
-                    is_editable = driver.execute_script("""
-                        return arguments[0].contentEditable === 'true' ||
-                               arguments[0].tagName === 'TEXTAREA' ||
-                               arguments[0].tagName === 'INPUT';
-                    """, element)
-                    
-                    if is_editable and element.is_displayed():
-                        if log_callback:
-                            log_callback(f"✅ Found message input with selector: {selector[:50]}")
-                        return element
-                except:
-                    continue
+                if element.is_displayed() and element.is_enabled():
+                    if log_callback:
+                        log_callback(f"✅ Found input: {selector[:40]}")
+                    return element
         except:
             continue
     
     return None
 
-# ==================== INBOX AUTOMATION (Working from Streamlit) ====================
-def send_inbox_messages(config: Dict, user_id: int, log_callback=None):
-    """Send messages to inbox - exact same working code from streamlit"""
+def find_comment_input(driver, log_callback=None):
+    time.sleep(5)
+    
+    selectors = [
+        'div[contenteditable="true"][aria-label*="comment" i]',
+        'div[contenteditable="true"][aria-label*="write" i]',
+        'div[contenteditable="true"]',
+        'textarea'
+    ]
+    
+    for selector in selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+            for element in elements:
+                if element.is_displayed() and element.is_enabled():
+                    if log_callback:
+                        log_callback(f"✅ Found comment input: {selector[:40]}")
+                    return element
+        except:
+            continue
+    
+    return None
+
+def send_message_to_input(driver, input_element, message, log_callback=None):
+    try:
+        driver.execute_script("""
+            arguments[0].focus();
+            arguments[0].click();
+            if (arguments[0].tagName === 'DIV') {
+                arguments[0].innerHTML = arguments[1];
+                arguments[0].textContent = arguments[1];
+            } else {
+                arguments[0].value = arguments[1];
+            }
+            arguments[0].dispatchEvent(new Event('input', { bubbles: true }));
+            arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+        """, input_element, message)
+        
+        time.sleep(1)
+        
+        # Try to click send button
+        send_buttons = driver.find_elements(By.CSS_SELECTOR, 
+            '[aria-label*="Send" i], [data-testid="send-button"], [aria-label*="Post" i], button[type="submit"]')
+        
+        for btn in send_buttons:
+            if btn.is_displayed():
+                btn.click()
+                if log_callback:
+                    log_callback(f"✅ Sent: {message[:50]}...")
+                return True
+        
+        # Try Enter key
+        driver.execute_script("""
+            var event = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true });
+            arguments[0].dispatchEvent(event);
+        """, input_element)
+        
+        if log_callback:
+            log_callback(f"✅ Sent via Enter: {message[:50]}...")
+        return True
+        
+    except Exception as e:
+        if log_callback:
+            log_callback(f"❌ Send error: {str(e)[:80]}")
+        return False
+
+# ==================== INBOX AUTOMATION ====================
+def run_inbox_automation(user_id: int, config: Dict, chat_id: int, log_callback=None):
     driver = None
     messages_sent = 0
     
     try:
         if log_callback:
-            log_callback("🚀 Starting inbox automation...")
+            log_callback("🚀 Starting INBOX automation...")
             log_callback(f"📱 Chat ID: {config['chat_id']}")
             log_callback(f"⏱️ Delay: {config['delay']}s")
         
         driver = setup_browser(log_callback)
         
-        # Navigate to Facebook
-        if log_callback:
-            log_callback("🌐 Opening Facebook...")
-        driver.get('https://www.facebook.com/')
-        time.sleep(8)
-        
-        # Add cookies
-        if config['cookies'] and config['cookies'].strip():
-            if log_callback:
-                log_callback("🍪 Adding cookies...")
-            cookie_array = config['cookies'].split(';')
-            for cookie in cookie_array:
-                cookie_trimmed = cookie.strip()
-                if cookie_trimmed and '=' in cookie_trimmed:
-                    first_equal_index = cookie_trimmed.find('=')
-                    name = cookie_trimmed[:first_equal_index].strip()
-                    value = cookie_trimmed[first_equal_index + 1:].strip()
-                    try:
-                        driver.add_cookie({
-                            'name': name,
-                            'value': value,
-                            'domain': '.facebook.com',
-                            'path': '/'
-                        })
-                    except:
-                        pass
-        
-        # Refresh to apply cookies
-        driver.refresh()
-        time.sleep(5)
-        
-        # Check if logged in
-        if 'login' in driver.current_url.lower():
-            if log_callback:
-                log_callback("❌ Not logged in! Cookies may be expired.")
+        # Login with cookies
+        if not add_facebook_cookies(driver, config['cookies'], log_callback):
             update_inbox_running(user_id, 0)
             return 0
         
-        if log_callback:
-            log_callback("✅ Successfully logged in!")
-        
         # Navigate to conversation
-        chat_id = config['chat_id'].strip()
-        if log_callback:
-            log_callback(f"💬 Opening conversation: {chat_id}")
-        
-        # Try both URL formats
+        chat_id_target = config['chat_id'].strip()
         urls = [
-            f'https://www.facebook.com/messages/t/{chat_id}',
-            f'https://www.facebook.com/messages/e2ee/t/{chat_id}'
+            f'https://www.facebook.com/messages/t/{chat_id_target}',
+            f'https://www.facebook.com/messages/e2ee/t/{chat_id_target}'
         ]
         
         for url in urls:
-            try:
-                driver.get(url)
-                time.sleep(8)
-                if 'messages' in driver.current_url:
-                    if log_callback:
-                        log_callback(f"✅ Opened conversation: {url}")
-                    break
-            except:
-                continue
+            driver.get(url)
+            time.sleep(8)
+            if 'messages' in driver.current_url:
+                if log_callback:
+                    log_callback(f"✅ Opened conversation")
+                break
         
         # Find message input
         message_input = find_message_input(driver, log_callback)
-        
         if not message_input:
             if log_callback:
                 log_callback("❌ Message input not found!")
@@ -484,184 +481,95 @@ def send_inbox_messages(config: Dict, user_id: int, log_callback=None):
         name_prefix = config.get('name_prefix', '')
         message_index = 0
         
-        if log_callback:
-            log_callback(f"📨 Starting message loop with {len(messages_list)} messages")
-        
-        # Main sending loop
+        # Main loop
         while True:
-            # Check if still running
             current_config = get_inbox_config(user_id)
             if not current_config or not current_config.get('running', 0):
                 if log_callback:
-                    log_callback("🛑 Automation stopped by user")
+                    log_callback("🛑 Automation stopped")
                 break
             
             message = messages_list[message_index % len(messages_list)]
             full_message = f"{name_prefix} {message}".strip() if name_prefix else message
             
-            try:
-                # Type message
-                driver.execute_script("""
-                    const element = arguments[0];
-                    const message = arguments[1];
-                    
-                    element.scrollIntoView({behavior: 'smooth', block: 'center'});
-                    element.focus();
-                    element.click();
-                    
-                    if (element.tagName === 'DIV') {
-                        element.textContent = message;
-                        element.innerHTML = message;
-                    } else {
-                        element.value = message;
-                    }
-                    
-                    element.dispatchEvent(new Event('input', { bubbles: true }));
-                    element.dispatchEvent(new Event('change', { bubbles: true }));
-                """, message_input, full_message)
-                
-                time.sleep(1)
-                
-                # Send message
-                sent = driver.execute_script("""
-                    const sendButtons = document.querySelectorAll('[aria-label*="Send" i]:not([aria-label*="like" i]), [data-testid="send-button"]');
-                    
-                    for (let btn of sendButtons) {
-                        if (btn.offsetParent !== null) {
-                            btn.click();
-                            return 'button_clicked';
-                        }
-                    }
-                    
-                    // Try Enter key
-                    const element = arguments[0];
-                    const enterEvent = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true });
-                    element.dispatchEvent(enterEvent);
-                    return 'enter_key';
-                """, message_input)
-                
+            if send_message_to_input(driver, message_input, full_message, log_callback):
                 messages_sent += 1
-                if log_callback:
-                    log_callback(f"✅ Message #{messages_sent}: {full_message[:50]}...")
-                
-                # Update message count in DB
                 update_inbox_running(user_id, 1, messages_sent)
-                
                 message_index += 1
-                time.sleep(delay)
-                
-            except Exception as e:
-                if log_callback:
-                    log_callback(f"❌ Error: {str(e)[:100]}")
-                time.sleep(5)
+            
+            time.sleep(delay)
         
         if log_callback:
-            log_callback(f"📊 Inbox automation stopped. Total messages: {messages_sent}")
+            log_callback(f"📊 Total messages sent: {messages_sent}")
         
         update_inbox_running(user_id, 0, messages_sent)
         return messages_sent
         
     except Exception as e:
-        logger.error(f"Inbox automation error: {e}")
+        logger.error(f"Inbox error: {e}")
         if log_callback:
-            log_callback(f"💥 Fatal error: {str(e)}")
+            log_callback(f"💥 Error: {str(e)}")
         update_inbox_running(user_id, 0)
         return 0
     finally:
         if driver:
-            try:
-                driver.quit()
-                if log_callback:
-                    log_callback("🔒 Browser closed")
-            except:
-                pass
+            driver.quit()
 
-def start_inbox_automation(user_id: int, config: Dict, log_callback=None):
-    """Start inbox automation in background thread"""
-    def run():
-        send_inbox_messages(config, user_id, log_callback)
+def start_inbox_automation(user_id: int, config: Dict, chat_id: int):
+    def run_with_logging():
+        def log(msg):
+            asyncio.run_coroutine_threadsafe(
+                send_telegram_log(chat_id, msg),
+                loop
+            )
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        run_inbox_automation(user_id, config, chat_id, log)
     
-    thread = threading.Thread(target=run)
+    thread = threading.Thread(target=run_with_logging)
     thread.daemon = True
     thread.start()
+    active_inbox_threads[user_id] = thread
 
 # ==================== GROUP AUTOMATION ====================
-def send_group_messages(config: Dict, user_id: int, log_callback=None):
-    """Send messages to group"""
+def run_group_automation(user_id: int, config: Dict, chat_id: int, log_callback=None):
     driver = None
     messages_sent = 0
     
     try:
         if log_callback:
-            log_callback("🚀 Starting group automation...")
+            log_callback("🚀 Starting GROUP automation...")
             log_callback(f"👥 Group ID: {config['group_id']}")
+            log_callback(f"📛 Group Name: {config['group_name']}")
             log_callback(f"⏱️ Delay: {config['delay']}s")
         
         driver = setup_browser(log_callback)
         
-        # Navigate to Facebook
-        driver.get('https://www.facebook.com/')
-        time.sleep(8)
-        
-        # Add cookies
-        if config['cookies'] and config['cookies'].strip():
-            cookie_array = config['cookies'].split(';')
-            for cookie in cookie_array:
-                cookie_trimmed = cookie.strip()
-                if cookie_trimmed and '=' in cookie_trimmed:
-                    first_equal_index = cookie_trimmed.find('=')
-                    name = cookie_trimmed[:first_equal_index].strip()
-                    value = cookie_trimmed[first_equal_index + 1:].strip()
-                    try:
-                        driver.add_cookie({'name': name, 'value': value, 'domain': '.facebook.com', 'path': '/'})
-                    except:
-                        pass
-        
-        driver.refresh()
-        time.sleep(5)
-        
-        if 'login' in driver.current_url.lower():
-            if log_callback:
-                log_callback("❌ Not logged in!")
+        # Login with cookies
+        if not add_facebook_cookies(driver, config['cookies'], log_callback):
             update_group_running(user_id, 0)
             return 0
         
         # Navigate to group
         group_id = config['group_id'].strip()
-        if log_callback:
-            log_callback(f"👥 Opening group: {group_id}")
-        
         driver.get(f'https://www.facebook.com/groups/{group_id}')
         time.sleep(8)
         
-        # Find comment box
-        comment_input = None
-        selectors = [
-            'div[contenteditable="true"][aria-label*="Write a comment" i]',
-            'div[contenteditable="true"][aria-label*="comment" i]',
-            'div[contenteditable="true"]',
-            'textarea'
-        ]
-        
-        for selector in selectors:
-            try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                for element in elements:
-                    if element.is_displayed():
-                        comment_input = element
-                        if log_callback:
-                            log_callback(f"✅ Found comment input")
-                        break
-                if comment_input:
-                    break
-            except:
-                continue
-        
+        # Find comment input
+        comment_input = find_comment_input(driver, log_callback)
         if not comment_input:
             if log_callback:
-                log_callback("❌ Comment input not found!")
-            update_group_running(user_id, 0)
-            return 0
+                log_callback("❌ Comment input not found! Trying alternative...")
+                # Try to find post box
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(2)
+                comment_input = find_comment_input(driver, log_callback)
+            
+            if not comment_input:
+                log_callback("❌ Could not find comment input!")
+                update_group_running(user_id, 0)
+                return 0
         
         # Prepare messages
         messages_list = [msg.strip() for msg in config['messages'].split('\n') if msg.strip()]
@@ -671,92 +579,72 @@ def send_group_messages(config: Dict, user_id: int, log_callback=None):
         delay = config['delay']
         message_index = 0
         
-        # Main sending loop
+        # Main loop
         while True:
             current_config = get_group_config(user_id)
             if not current_config or not current_config.get('running', 0):
+                if log_callback:
+                    log_callback("🛑 Group automation stopped")
                 break
             
             message = messages_list[message_index % len(messages_list)]
             
-            try:
-                # Type comment
-                driver.execute_script("""
-                    arguments[0].focus();
-                    arguments[0].click();
-                    arguments[0].innerHTML = arguments[1];
-                    arguments[0].dispatchEvent(new Event('input', { bubbles: true }));
-                """, comment_input, message)
-                
-                time.sleep(1)
-                
-                # Find and click post button
-                post_buttons = driver.find_elements(By.CSS_SELECTOR, 
-                    '[aria-label*="Post" i], [aria-label*="Comment" i], button[type="submit"]')
-                
-                posted = False
-                for btn in post_buttons:
-                    if btn.is_displayed():
-                        btn.click()
-                        posted = True
-                        break
-                
-                if not posted:
-                    driver.execute_script("""
-                        const event = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13 });
-                        arguments[0].dispatchEvent(event);
-                    """, comment_input)
-                
+            if send_message_to_input(driver, comment_input, message, log_callback):
                 messages_sent += 1
-                if log_callback:
-                    log_callback(f"✅ Group message #{messages_sent}: {message[:50]}...")
-                
                 update_group_running(user_id, 1, messages_sent)
                 message_index += 1
-                time.sleep(delay)
-                
-            except Exception as e:
-                if log_callback:
-                    log_callback(f"❌ Error: {str(e)[:100]}")
-                time.sleep(5)
+            
+            time.sleep(delay)
         
         if log_callback:
-            log_callback(f"📊 Group automation stopped. Total messages: {messages_sent}")
+            log_callback(f"📊 Total group messages sent: {messages_sent}")
         
         update_group_running(user_id, 0, messages_sent)
         return messages_sent
         
     except Exception as e:
-        logger.error(f"Group automation error: {e}")
+        logger.error(f"Group error: {e}")
         if log_callback:
-            log_callback(f"💥 Fatal error: {str(e)}")
+            log_callback(f"💥 Error: {str(e)}")
         update_group_running(user_id, 0)
         return 0
     finally:
         if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+            driver.quit()
 
-def start_group_automation(user_id: int, config: Dict, log_callback=None):
-    """Start group automation in background thread"""
-    def run():
-        send_group_messages(config, user_id, log_callback)
+def start_group_automation(user_id: int, config: Dict, chat_id: int):
+    def run_with_logging():
+        def log(msg):
+            asyncio.run_coroutine_threadsafe(
+                send_telegram_log(chat_id, msg),
+                loop
+            )
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        run_group_automation(user_id, config, chat_id, log)
     
-    thread = threading.Thread(target=run)
+    thread = threading.Thread(target=run_with_logging)
     thread.daemon = True
     thread.start()
+    active_group_threads[user_id] = thread
+
+async def send_telegram_log(chat_id: int, message: str):
+    """Send log message to Telegram"""
+    try:
+        app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        await app.bot.send_message(chat_id=chat_id, text=message)
+        await app.shutdown()
+    except:
+        pass
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 class AutomationBot:
     def __init__(self):
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         self.setup_handlers()
-        self.user_log_callbacks = {}
     
     def setup_handlers(self):
-        """Setup all handlers"""
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('start', self.start_command)],
             states={
@@ -767,6 +655,7 @@ class AutomationBot:
                 WAITING_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_delay)],
                 WAITING_MESSAGES: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_messages)],
                 WAITING_GROUP_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_group_id)],
+                WAITING_GROUP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_group_name)],
                 WAITING_GROUP_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_group_delay)],
                 WAITING_GROUP_MESSAGES: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.receive_group_messages)],
             },
@@ -782,7 +671,6 @@ class AutomationBot:
         self.application.add_error_handler(self.error_handler)
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start command - show automation choice"""
         user = update.effective_user
         user_id, approval_key, approved = get_or_create_user(user.id, user.username)
         
@@ -791,35 +679,30 @@ class AutomationBot:
                 [InlineKeyboardButton("📥 Inbox Automation", callback_data="inbox")],
                 [InlineKeyboardButton("👥 Group Automation", callback_data="group")]
             ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
             await update.message.reply_text(
-                f"✨ Welcome {user.first_name}! ✨\n\n"
-                f"Choose automation type:",
-                reply_markup=reply_markup
+                f"✨ Welcome {user.first_name}! Choose automation type:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
             context.user_data['user_id'] = user_id
             return CHOOSING_AUTOMATION
         else:
             message = f"""
-👑 **SYAPA KING FACEBOOK AUTOMATION BOT** 👑
+👑 **SYAPA KING FACEBOOK BOT** 👑
 
 Hello {user.first_name}!
 
-🔑 **Your Approval Key:** `{approval_key}`
+🔑 **Approval Key:** `{approval_key}`
 
 📌 **To get approved:**
-1. Contact owner: {OWNER_FACEBOOK}
+1. Contact: {OWNER_FACEBOOK}
 2. Send your approval key
-3. Wait for approval
 
 ✅ After approval, use /start again.
 
-*Features:*
+**Features:**
 • 📥 Inbox Automation - Send messages to any conversation
 • 👥 Group Automation - Send messages to groups
 • 🔐 Cookie-based authentication
-• ⏰ 24/7 automation
 
 👑 **Owner:** {OWNER_NAME}
 """
@@ -827,7 +710,6 @@ Hello {user.first_name}!
             return ConversationHandler.END
     
     async def automation_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle automation type choice"""
         query = update.callback_query
         await query.answer()
         
@@ -838,9 +720,8 @@ Hello {user.first_name}!
                 "Send your Facebook cookies.\n\n"
                 "*How to get cookies:*\n"
                 "1. Login to Facebook\n"
-                "2. Open Developer Tools (F12)\n"
-                "3. Go to Application → Cookies → https://www.facebook.com\n"
-                "4. Copy all cookies as:\n"
+                "2. Press F12 → Application → Cookies\n"
+                "3. Copy all cookies as:\n"
                 "`c_user=123456; xs=789:...; datr=...`"
             )
             return WAITING_COOKIES
@@ -851,42 +732,34 @@ Hello {user.first_name}!
                 "Send your Facebook cookies.\n\n"
                 "*How to get cookies:*\n"
                 "1. Login to Facebook\n"
-                "2. Open Developer Tools (F12)\n"
-                "3. Go to Application → Cookies → https://www.facebook.com\n"
-                "4. Copy all cookies as:\n"
+                "2. Press F12 → Application → Cookies\n"
+                "3. Copy all cookies as:\n"
                 "`c_user=123456; xs=789:...; datr=...`"
             )
             return WAITING_COOKIES
     
     async def receive_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive cookies"""
-        cookies = update.message.text.strip()
-        context.user_data['cookies'] = cookies
+        context.user_data['cookies'] = update.message.text.strip()
         
         if context.user_data['automation_type'] == 'inbox':
             await update.message.reply_text(
                 "✅ Cookies received!\n\n"
-                "Now send the **Chat ID**.\n\n"
+                "Send **Chat ID**.\n\n"
                 "*How to get Chat ID:*\n"
-                "Open the conversation → URL:\n"
-                "facebook.com/messages/t/`CHAT_ID`"
+                "Open conversation → URL: facebook.com/messages/t/`CHAT_ID`"
             )
             return WAITING_INBOX_CHAT_ID
         else:
             await update.message.reply_text(
                 "✅ Cookies received!\n\n"
-                "Now send the **Group ID**.\n\n"
+                "Send **Group ID**.\n\n"
                 "*How to get Group ID:*\n"
-                "Open the group → URL:\n"
-                "facebook.com/groups/`GROUP_ID`"
+                "Open group → URL: facebook.com/groups/`GROUP_ID`"
             )
             return WAITING_GROUP_ID
     
     async def receive_inbox_chat_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive chat ID"""
-        chat_id = update.message.text.strip()
-        context.user_data['chat_id'] = chat_id
-        
+        context.user_data['chat_id'] = update.message.text.strip()
         await update.message.reply_text(
             "✅ Chat ID received!\n\n"
             "Send **Name Prefix** (optional, send 0 to skip)\n"
@@ -895,12 +768,8 @@ Hello {user.first_name}!
         return WAITING_NAME_PREFIX
     
     async def receive_name_prefix(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive name prefix"""
         name_prefix = update.message.text.strip()
-        if name_prefix == "0":
-            name_prefix = ""
-        context.user_data['name_prefix'] = name_prefix
-        
+        context.user_data['name_prefix'] = "" if name_prefix == "0" else name_prefix
         await update.message.reply_text(
             "✅ Name prefix saved!\n\n"
             "Send **Delay** between messages (seconds)\n"
@@ -909,14 +778,10 @@ Hello {user.first_name}!
         return WAITING_DELAY
     
     async def receive_delay(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive delay"""
         try:
-            delay = int(update.message.text.strip())
-            context.user_data['delay'] = delay
+            context.user_data['delay'] = int(update.message.text.strip())
         except:
-            await update.message.reply_text("Please send a valid number")
-            return WAITING_DELAY
-        
+            context.user_data['delay'] = 30
         await update.message.reply_text(
             "✅ Delay saved!\n\n"
             "Send your **Messages** (one per line)\n\n"
@@ -928,56 +793,57 @@ Hello {user.first_name}!
         return WAITING_MESSAGES
     
     async def receive_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive messages and save config"""
         messages = update.message.text.strip()
-        
         user_id = context.user_data['user_id']
-        chat_id = context.user_data['chat_id']
-        name_prefix = context.user_data['name_prefix']
-        delay = context.user_data['delay']
-        cookies = context.user_data['cookies']
+        chat_id = update.effective_chat.id
         
-        save_inbox_config(user_id, chat_id, name_prefix, delay, messages, cookies)
+        save_inbox_config(
+            user_id,
+            context.user_data['chat_id'],
+            context.user_data['name_prefix'],
+            context.user_data['delay'],
+            messages,
+            context.user_data['cookies']
+        )
         
         await update.message.reply_text(
-            f"✅ **Inbox Automation Configured!** ✅\n\n"
-            f"Chat ID: `{chat_id}`\n"
-            f"Delay: `{delay}s`\n"
+            f"✅ **Inbox Configured!**\n\n"
+            f"Chat ID: `{context.user_data['chat_id']}`\n"
+            f"Delay: `{context.user_data['delay']}s`\n"
             f"Messages: `{len([m for m in messages.split('\\n') if m.strip()])}`\n\n"
-            f"Use /start to configure more\n"
-            f"Use /status to check status\n"
-            f"Use /stop to stop automation",
+            f"Use /start to start automation",
             parse_mode='Markdown'
         )
         
         # Ask to start
-        keyboard = [[InlineKeyboardButton("▶️ Start Automation", callback_data="start_inbox")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Start automation now?", reply_markup=reply_markup)
+        keyboard = [[InlineKeyboardButton("▶️ Start Inbox Automation", callback_data="start_inbox")]]
+        await update.message.reply_text("Start now?", reply_markup=InlineKeyboardMarkup(keyboard))
         
         return ConversationHandler.END
     
     async def receive_group_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive group ID"""
-        group_id = update.message.text.strip()
-        context.user_data['group_id'] = group_id
-        
+        context.user_data['group_id'] = update.message.text.strip()
         await update.message.reply_text(
             "✅ Group ID received!\n\n"
+            "Send **Group Name** (for reference)\n"
+            "Example: My Group"
+        )
+        return WAITING_GROUP_NAME
+    
+    async def receive_group_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data['group_name'] = update.message.text.strip()
+        await update.message.reply_text(
+            "✅ Group name saved!\n\n"
             "Send **Delay** between messages (seconds)\n"
             "Example: 30"
         )
         return WAITING_GROUP_DELAY
     
     async def receive_group_delay(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive group delay"""
         try:
-            delay = int(update.message.text.strip())
-            context.user_data['delay'] = delay
+            context.user_data['delay'] = int(update.message.text.strip())
         except:
-            await update.message.reply_text("Please send a valid number")
-            return WAITING_GROUP_DELAY
-        
+            context.user_data['delay'] = 30
         await update.message.reply_text(
             "✅ Delay saved!\n\n"
             "Send your **Messages** (one per line)\n\n"
@@ -989,36 +855,36 @@ Hello {user.first_name}!
         return WAITING_GROUP_MESSAGES
     
     async def receive_group_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Receive group messages and save config"""
         messages = update.message.text.strip()
-        
         user_id = context.user_data['user_id']
-        group_id = context.user_data['group_id']
-        delay = context.user_data['delay']
-        cookies = context.user_data['cookies']
+        chat_id = update.effective_chat.id
         
-        save_group_config(user_id, group_id, delay, messages, cookies)
+        save_group_config(
+            user_id,
+            context.user_data['group_id'],
+            context.user_data['group_name'],
+            context.user_data['delay'],
+            messages,
+            context.user_data['cookies']
+        )
         
         await update.message.reply_text(
-            f"✅ **Group Automation Configured!** ✅\n\n"
-            f"Group ID: `{group_id}`\n"
-            f"Delay: `{delay}s`\n"
+            f"✅ **Group Configured!**\n\n"
+            f"Group ID: `{context.user_data['group_id']}`\n"
+            f"Group Name: `{context.user_data['group_name']}`\n"
+            f"Delay: `{context.user_data['delay']}s`\n"
             f"Messages: `{len([m for m in messages.split('\\n') if m.strip()])}`\n\n"
-            f"Use /start to configure more\n"
-            f"Use /status to check status\n"
-            f"Use /stop to stop automation",
+            f"Use /start to start automation",
             parse_mode='Markdown'
         )
         
         # Ask to start
-        keyboard = [[InlineKeyboardButton("▶️ Start Automation", callback_data="start_group")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Start automation now?", reply_markup=reply_markup)
+        keyboard = [[InlineKeyboardButton("▶️ Start Group Automation", callback_data="start_group")]]
+        await update.message.reply_text("Start now?", reply_markup=InlineKeyboardMarkup(keyboard))
         
         return ConversationHandler.END
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show status"""
         user = update.effective_user
         user_id, _, approved = get_or_create_user(user.id, user.username)
         
@@ -1030,41 +896,38 @@ Hello {user.first_name}!
         status_text += f"Approved: {'✅ Yes' if approved else '❌ No'}\n\n"
         
         if inbox_config:
-            status_text += f"**📥 Inbox Automation:**\n"
-            status_text += f"• Chat ID: `{inbox_config['chat_id'][:20]}...`\n"
+            status_text += f"**📥 Inbox:**\n"
+            status_text += f"• Chat: `{inbox_config['chat_id'][:20]}...`\n"
             status_text += f"• Status: {'🟢 Running' if inbox_config['running'] else '🔴 Stopped'}\n"
-            status_text += f"• Messages Sent: {inbox_config['message_count']}\n\n"
+            status_text += f"• Sent: {inbox_config['message_count']}\n\n"
         
         if group_config:
-            status_text += f"**👥 Group Automation:**\n"
-            status_text += f"• Group ID: `{group_config['group_id'][:20]}...`\n"
+            status_text += f"**👥 Group:**\n"
+            status_text += f"• Group: `{group_config['group_name'][:20] or group_config['group_id'][:20]}...`\n"
             status_text += f"• Status: {'🟢 Running' if group_config['running'] else '🔴 Stopped'}\n"
-            status_text += f"• Messages Sent: {group_config['message_count']}\n\n"
+            status_text += f"• Sent: {group_config['message_count']}\n\n"
         
         await update.message.reply_text(status_text, parse_mode='Markdown')
     
     async def stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Stop all automations"""
         user = update.effective_user
         user_id, _, _ = get_or_create_user(user.id, user.username)
         
-        # Stop inbox
         inbox_config = get_inbox_config(user_id)
+        group_config = get_group_config(user_id)
+        
         if inbox_config and inbox_config['running']:
             update_inbox_running(user_id, 0)
+            await update.message.reply_text("🛑 Inbox automation stopped!")
         
-        # Stop group
-        group_config = get_group_config(user_id)
         if group_config and group_config['running']:
             update_group_running(user_id, 0)
+            await update.message.reply_text("🛑 Group automation stopped!")
         
-        await update.message.reply_text(
-            "🛑 **All automations stopped!**\n\n"
-            "Use /start to configure and start again."
-        )
+        if not inbox_config and not group_config:
+            await update.message.reply_text("No active automation found.")
     
     async def approve_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Approve user (admin only)"""
         if update.effective_user.id not in ADMIN_USER_IDS:
             await update.message.reply_text("❌ Unauthorized")
             return
@@ -1079,7 +942,6 @@ Hello {user.first_name}!
             await update.message.reply_text("Usage: /approve <telegram_id>")
     
     async def list_users_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List all users (admin only)"""
         if update.effective_user.id not in ADMIN_USER_IDS:
             await update.message.reply_text("❌ Unauthorized")
             return
@@ -1100,8 +962,7 @@ Hello {user.first_name}!
             await update.message.reply_text("No users")
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Help command"""
-        help_text = """
+        help_text = f"""
 🤖 **SYAPA KING FACEBOOK BOT**
 
 **Commands:**
@@ -1117,17 +978,17 @@ Hello {user.first_name}!
 **Features:**
 • 📥 Inbox Automation - Send messages to conversations
 • 👥 Group Automation - Send messages to groups
+• 🔐 Cookie-based authentication
 
-For support: """ + OWNER_FACEBOOK
+For support: {OWNER_FACEBOOK}
+"""
         await update.message.reply_text(help_text, parse_mode='Markdown')
     
     async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Cancel current operation"""
         await update.message.reply_text("❌ Cancelled. Use /start to begin again.")
         return ConversationHandler.END
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle errors"""
         logger.error(f"Error: {context.error}")
         if update and update.effective_chat:
             await context.bot.send_message(
@@ -1136,38 +997,32 @@ For support: """ + OWNER_FACEBOOK
             )
     
     def run(self):
-        """Run the bot"""
         init_db()
         logger.info("Starting Facebook Automation Bot...")
         self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
+# ==================== MAIN ====================
 if __name__ == "__main__":
-    # Add these imports at the top
-from flask import Flask
-import threading
-
-# Create a simple Flask app for health check
-health_app = Flask(__name__)
-
-@health_app.route('/')
-@health_app.route('/health')
-def health_check():
-    return "Bot is running!", 200
-
-def run_health_server():
-    """Run Flask server for Render health checks"""
-    port = int(os.environ.get('PORT', 8080))
-    health_app.run(host='0.0.0.0', port=port)
-
-if __name__ == "__main__":
-    # Initialize database
-    init_db()
+    # For Render - keep alive
+    import threading
+    import socket
     
-    # Start health check server in background
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
+    def keep_alive():
+        try:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.bind(("0.0.0.0", int(os.environ.get("PORT", 8080))))
+            server.listen(1)
+            print(f"Keep-alive server running on port {os.environ.get('PORT', 8080)}")
+            while True:
+                conn, addr = server.accept()
+                conn.sendall(b"Bot is running!")
+                conn.close()
+        except Exception as e:
+            print(f"Keep-alive server error: {e}")
     
-    # Start Telegram bot
-    logger.info("Starting Facebook Automation Bot...")
+    # Start keep-alive in background
+    threading.Thread(target=keep_alive, daemon=True).start()
+    
+    # Start bot
     bot = AutomationBot()
     bot.run()
