@@ -10,14 +10,14 @@ services:
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false
+        value: 7791213862:AAFvGyuCCVZqpnQQwjZBbu89drzuiJPAcJM
       - key: ADMIN_USER_IDS
-        sync: false
+        value: 7791213862
       - key: OWNER_FACEBOOK
-        sync: false
+        value: https://www.facebook.com/share/168AJz6Ehm/
       - key: DATA_DIR
-        value: /opt/render/project/outputs
+        value: /tmp/data
     disk:
       name: data
-      mountPath: /opt/render/project/outputs
+      mountPath: /tmp/data
       sizeGB: 1
