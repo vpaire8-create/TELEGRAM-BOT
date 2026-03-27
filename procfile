@@ -1,2 +1,0 @@
-worker: python telegram_bot.py
-web: gunicorn server:app
